@@ -15,8 +15,8 @@ body {
     flex: 1;
     max-width: 1200px;
     width: 100%;
-    margin: 0;
-    padding: 30px 20px;
+    margin: 0 auto;
+    padding: 80px;
 }
 
 header {
@@ -52,7 +52,7 @@ footer {
     display: flex;
     align-items: center;
     justify-content: flex-start;
-    padding: 15px, 30px;
+    padding: 15px 30px;
     gap: 40px;
 }
 
@@ -61,7 +61,6 @@ footer {
     list-style: none; /* removes bullet points */
     display: flex; /* Horizontal formation */
     align-items: center;
-    display: flex;
     gap: 20px; 
     margin: 0;
     padding: 0;
@@ -125,7 +124,7 @@ footer {
 #photos {
     max-width: 800px;
     width: 100%;
-    margin: 0;
+    margin: 0 auto;
 }
 
 /* design of the card box background for the imgages to on */
