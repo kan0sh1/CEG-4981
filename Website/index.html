@@ -18,16 +18,35 @@
             </nav>
         </header>
 
+        <!-- Main Content Section -->
         <main class="main-content">
-            <!-- Section for videos -->
+
+            <!-- Section for authentication & videos -->
             <section id="home" class="section">
+
+                <!-- Authication box -->
+                <div class="card auth-card">
+                    <h3>Authentication Needed</h3>
+                    <p>Insert USB, and enter your access PIN: </p>
+                    <div class="auth_input">
+                        <input
+                        type="password"
+                        id="pinInput"
+                        placeholder="Enter PIN"
+                        >
+                        <button id="loginBtn">Authenticate</button>
+                    </div>
+                    <p id="authStatus"></p>
+                </div>
+
+                <!-- Video box -->
                 <div class="card video-card">
                     <div class="video-header">
                         <h3 id="statusText">Current Feed</h3>
                     </div>
 
                     <div id="videoContainer" class="video-wrapper">
-                        <!-- Video Player Container -->
+                        <!-- Video Player -->
                     </div>
                 </div>
             </section>

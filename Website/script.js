@@ -1,13 +1,15 @@
-// const
+// element refrences
 const homeLink = document.getElementById('homeLink');
 const photosLink = document.getElementById('photosLink');
 const homeSection = document.getElementById('home');
 const photoSection = document.getElementById('photos');
 const videoContainer = document.getElementById('videoContainer');
+const pinInput = document.getElementById('pinInput');
+const loginBtn = document.getElementById('loginBtn');
+const authStatus = document.getElementById('authStatus');
 
 // Youtube Video IDs
 const PUBLIC_VIDEO_ID = "F2sERCgDESE"; // public video
-// const PRIVATE_VIDEO_ID = "zGwszApFEcY" private video, only Obi-Wan
 
 
 // Load Public Video Test
@@ -23,10 +25,22 @@ function loadPublicStream() {
     `;
 }
 
+// Load Private Video
+function loadPrivateStream(video_id) {
+    videoContainer.innerHTML = `
+    <iframe
+        src="https://www.youtube.com/embed/${video_id}?autoplay=1&mute=0"
+        title="Private Stream"
+        frameborder="0"
+        allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
+    </iframe>
+    `;
+}
+
 
 // render 10 photos
 function renderTransmittedPhotos() {
-    const imageGrid = document.getElementById('imageGrid'); // searches exisiting element in html, assign it variable imageGrid
+    const imageGrid = document.getElementById('imageGrid'); // searches exisiting element in html
     // clear container
     imageGrid.innerHTML = '';
 
@@ -54,6 +68,36 @@ photosLink.addEventListener('click', (e)=> {
     photoSection.classList.remove('hidden');
 });
 
-// Loads initiating page
+// Authentication button click
+loginBtn.addEventListener('click', async () => {
+    const enteredPin = pinInput.value.trim();    // get entered pin, trim whitespace
+
+    try {   // POST request with PIN to Flask
+        const response = await fetch('/api/login', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({ pin: enteredPin })
+        });
+
+        const data = await response.json();     // Json response from server
+
+        // if statement, if status is 200 and authenticated
+        if (response.ok && data.authenticated) {
+            authStatus.textContent = data.message;
+            loadPrivateStream(data.video_id); // load private video into iframe
+        } else { // else display error message
+            authStatus.textContent = data.message || "Authentication failed.";
+        }
+    } 
+    // handles network connection failure or unreachable errors
+    catch (error) {
+        console.error("Error connecting to backend API:", error);
+        authStatus.textContent = "Error: Unable to connect to backend server."; // error message
+    }
+});
+
+// Loads initiating public video
 loadPublicStream();
 renderTransmittedPhotos();

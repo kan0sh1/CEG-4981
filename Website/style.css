@@ -83,6 +83,41 @@ footer {
     color:blueviolet;
 }
 
+/* Authentication Styling */
+.auth-card {
+    margin-bottom: 24px;
+}
+/* login authenticate button */
+#loginBtn {
+    padding: 10px 20px;
+    background-color: rgb(46, 26, 178);
+    color: #ffffff;
+    border: none;
+}
+
+#loginBtn:hover {
+    background-color: blueviolet;
+}
+
+#authStatus {
+    margin-top: 12px;
+    min-height: 20px;
+}
+/* authorization card dimensions */
+.auth-input {
+    display: flex;
+    gap: 12px;
+    margin-top: 12px;
+    max-width: 400px;
+}
+/* enter PIN styling */
+#pinInput {
+    padding: 10px;
+    border-radius: 6px;
+    border: 1px solid #000;
+    flex: 1;
+}
+
 /* Video Styling */
 
 .card {
