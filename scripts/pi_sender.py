@@ -1,227 +1,183 @@
 """
 pi_sender.py
-USB Scanner, OpenCV Red Ring Detector/Cropper, Cryptographic Staging, and RF Transmitter.
+Integrates CircleDetection/red_ring.py and ImageSecurity/crypto_transport.py
+into an end-to-end processing pipeline for Raspberry Pi / local execution.
 """
 
 import os
 import sys
-import time
 import glob
-import math
+import time
 import logging
 from pathlib import Path
-from typing import List, Tuple, Optional
+from typing import List
 
 import cv2
-import numpy as np
 
-# Configure Logging
+# Ensure project root is on Python's search path
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+# Setup Logging
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
     handlers=[logging.StreamHandler(sys.stdout)]
 )
 
-# Pipeline Configuration
-USB_MOUNT_DIR = "/media/usb"
-STAGING_CROP_DIR = "./staged_crops"
+# 1. Import module routines directly from project folders
+try:
+    from CircleDetection.red_ring import (
+        make_red_mask_hsv,
+        clean_mask,
+        detect_best_ring,
+        crop_including_ring
+    )
+    logging.info("[SETUP] Successfully imported CircleDetection.red_ring")
+except ImportError as e:
+    logging.error(f"[ERROR] Failed importing red_ring module: {e}")
+    sys.exit(1)
+
+try:
+    from ImageSecurity import crypto_transport
+    logging.info("[SETUP] Successfully imported ImageSecurity.crypto_transport")
+except ImportError as e:
+    logging.error(f"[ERROR] Failed importing crypto_transport module: {e}")
+    sys.exit(1)
+
+# Pipeline Paths & Defaults
+INPUT_IMAGES_DIR = PROJECT_ROOT / "CircleDetection" / "test_images"
+STAGED_CROPS_DIR = PROJECT_ROOT / "staged_crops"
 IMG_EXTENSIONS = ("*.png", "*.jpg", "*.jpeg", "*.bmp", "*.tif", "*.tiff", "*.webp")
 
 
 # =====================================================================
-# 1. RED RING DETECTION & CROPPING UTILITIES (From red_ring.py)
+# 2. VISION PIPELINE INTEGRATION
 # =====================================================================
 
-def circularity(area: float, perimeter: float) -> float:
-    """Calculates contour circularity metric (4 * pi * Area / Perimeter^2)."""
-    if perimeter <= 1e-9:
-        return 0.0
-    return float(4.0 * math.pi * area / (perimeter * perimeter))
-
-
-def detect_and_crop_red_ring(
-    image_path: str,
-    output_dir: str,
-    s_min: int = 80,
-    v_min: int = 80,
-    min_outer_area: float = 800.0,
-    min_inner_area: float = 200.0,
-    circ_outer: float = 0.75,
-    circ_inner: float = 0.70,
-    center_tol_ratio: float = 0.12,
-    outer_scale: float = 0.89
-) -> Optional[str]:
+def process_and_crop_image(image_path: Path, output_dir: Path) -> str | None:
     """
-    Reads an image from disk, detects a red ring using HSV masking + contour hierarchy,
-    crops the ring feature with anti-aliased circular blending, saves lossless PNG to
-    output_dir, and returns the path to the cropped file (or None if no match).
+    Passes raw image through red_ring.py detection pipeline.
+    Saves antialiased crop to output_dir if a ring is matched.
     """
-    bgr = cv2.imread(image_path)
+    bgr = cv2.imread(str(image_path))
     if bgr is None:
+        logging.warning(f"[VISION SKIP] Unreadable image file: {image_path.name}")
         return None
 
-    # Step A: Dual-range HSV Red Masking
-    hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
-    lower1 = np.array([0, s_min, v_min], dtype=np.uint8)
-    upper1 = np.array([10, 255, 255], dtype=np.uint8)
-    lower2 = np.array([170, s_min, v_min], dtype=np.uint8)
-    upper2 = np.array([180, 255, 255], dtype=np.uint8)
+    # Run red_ring detection routines
+    mask = make_red_mask_hsv(bgr, s_min=80, v_min=80)
+    mask = clean_mask(mask, k_open=3, k_close=7)
 
-    mask1 = cv2.inRange(hsv, lower1, upper1)
-    mask2 = cv2.inRange(hsv, lower2, upper2)
-    mask = cv2.bitwise_or(mask1, mask2)
+    ring = detect_best_ring(
+        mask=mask,
+        min_outer_area=800.0,
+        min_inner_area=200.0,
+        circ_thresh_outer=0.75,
+        circ_thresh_inner=0.70,
+        center_tol_ratio=0.12
+    )
 
-    # Step B: Morphological Cleaning (Open removes noise, Close connects ring gaps)
-    ker_o = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
-    ker_c = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
-    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, ker_o, iterations=1)
-    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, ker_c, iterations=2)
-
-    # Step C: Contour Hierarchy Tree Evaluation
-    contours, hierarchy = cv2.findContours(mask, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
-    if hierarchy is None or len(contours) == 0:
+    if ring is None:
+        logging.debug(f"[VISION SKIP] No red ring target found in: {image_path.name}")
         return None
 
-    hierarchy = hierarchy[0]  # Shape: (N, 4) -> [next, prev, child, parent]
-    best_ring = None
+    # Crop including outer boundary with anti-aliasing
+    crop = crop_including_ring(
+        bgr=bgr,
+        center=ring.get("center_o", ring["center"]),
+        r_outer=ring["r_outer"],
+        outer_scale=0.89,
+        circular_mask=True
+    )
 
-    for i, cnt_outer in enumerate(contours):
-        child_idx = int(hierarchy[i][2])
-        if child_idx < 0:
-            continue  # Must have an inner child (hole) to form a ring
-
-        area_o = float(cv2.contourArea(cnt_outer))
-        if area_o < min_outer_area:
-            continue
-
-        per_o = float(cv2.arcLength(cnt_outer, True))
-        c_outer = circularity(area_o, per_o)
-        if c_outer < circ_outer:
-            continue
-
-        cnt_inner = contours[child_idx]
-        area_i = float(cv2.contourArea(cnt_inner))
-        if area_i < min_inner_area:
-            continue
-
-        per_i = float(cv2.arcLength(cnt_inner, True))
-        c_inner = circularity(area_i, per_i)
-        if c_inner < circ_inner:
-            continue
-
-        (cx_o, cy_o), r_o = cv2.minEnclosingCircle(cnt_outer)
-        (cx_i, cy_i), r_i = cv2.minEnclosingCircle(cnt_inner)
-
-        if r_i <= 1 or r_o <= 1 or r_i >= r_o:
-            continue
-
-        # Centers must align within threshold
-        dist = math.hypot(cx_o - cx_i, cy_o - cy_i)
-        if dist > (center_tol_ratio * r_o):
-            continue
-
-        # Score calculation matching red_ring.py
-        score = (2.0 * c_outer + 2.0 * c_inner) + 0.002 * area_o + 0.001 * area_i
-        if best_ring is None or score > best_ring["score"]:
-            best_ring = {
-                "center_o": (cx_o, cy_o),
-                "center_i": (cx_i, cy_i),
-                "r_outer": r_o,
-                "score": score
-            }
-
-    if best_ring is None:
+    if crop is None or crop.size == 0:
         return None
 
-    # Step D: Crop including ring boundary
-    h, w = bgr.shape[:2]
-    cx, cy = best_ring["center_o"]
-    r = max(1.0, best_ring["r_outer"] * outer_scale)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    out_path = output_dir / f"crop_{image_path.stem}.png"
 
-    x1 = int(round(cx - r))
-    y1 = int(round(cy - r))
-    x2 = int(round(cx + r))
-    y2 = int(round(cy + r))
-
-    x1c, y1c = max(0, x1), max(0, y1)
-    x2c, y2c = min(w, x2), min(h, y2)
-
-    crop = bgr[y1c:y2c, x1c:x2c].copy()
-    if crop.size == 0:
-        return None
-
-    # Step E: 4x Anti-aliased Circular Alpha Masking
-    ch, cw = crop.shape[:2]
-    ss = 4
-    mask_hi = np.zeros((ch * ss, cw * ss), dtype=np.uint8)
-    ccx = int(round((cx - x1c) * ss))
-    ccy = int(round((cy - y1c) * ss))
-    rr = int(round(min(r, min(cw, ch) / 2.0) * ss))
-    cv2.circle(mask_hi, (ccx, ccy), rr, 255, thickness=-1, lineType=cv2.LINE_AA)
-    
-    crop_mask = cv2.resize(mask_hi, (cw, ch), interpolation=cv2.INTER_AREA)
-    mask_f = (crop_mask.astype(np.float32) / 255.0)[:, :, None]
-    crop = (crop.astype(np.float32) * mask_f).astype(np.uint8)
-
-    # Step F: Stage Lossless Crop PNG
-    os.makedirs(output_dir, exist_ok=True)
-    base_name = os.path.splitext(os.path.basename(image_path))[0]
-    out_path = os.path.join(output_dir, f"crop_{base_name}.png")
-    
-    cv2.imwrite(out_path, crop, [int(cv2.IMWRITE_PNG_COMPRESSION), 1])
-    logging.info(f"[VISION MATCH] Red ring detected (score={best_ring['score']:.2f}) -> Staged: {out_path}")
-    return out_path
+    # Save as lossless PNG
+    cv2.imwrite(str(out_path), crop, [int(cv2.IMWRITE_PNG_COMPRESSION), 1])
+    logging.info(f"[VISION MATCH] Target detected in {image_path.name} (score={ring['score']:.2f}) -> Staged: {out_path.name}")
+    return str(out_path)
 
 
-# =====================================================================
-# 2. USB SCANNER INTERFACE
-# =====================================================================
-
-def scan_usb_for_plans(usb_dir: str) -> List[str]:
-    """
-    Scans USB directory for raw images, runs embedded red ring vision detection,
-    crops matched targets, and returns staged file paths for crypto/RF pipeline.
-    """
-    logging.info(f"[USB] Scanning mount path: {usb_dir}...")
-    if not os.path.exists(usb_dir):
-        logging.warning(f"[USB] Mount directory {usb_dir} not accessible.")
+def scan_and_stage_targets(input_dir: Path) -> List[str]:
+    """Scans directory and runs vision processing on all candidate images."""
+    logging.info(f"[PIPELINE] Scanning input path: {input_dir}")
+    if not input_dir.exists():
+        logging.error(f"[ERROR] Input directory {input_dir} does not exist.")
         return []
 
-    all_files = []
+    image_files = []
     for ext in IMG_EXTENSIONS:
-        all_files.extend(glob.glob(os.path.join(usb_dir, "**", ext), recursive=True))
+        image_files.extend(input_dir.glob(ext))
 
-    logging.info(f"[VISION] Processing {len(all_files)} raw candidate image(s)...")
+    logging.info(f"[PIPELINE] Found {len(image_files)} source candidate(s)...")
     staged_crops = []
 
-    for file_path in all_files:
-        cropped_path = detect_and_crop_red_ring(file_path, STAGING_CROP_DIR)
-        if cropped_path:
-            staged_crops.append(cropped_path)
-        else:
-            logging.debug(f"[VISION SKIP] No target ring feature in: {os.path.basename(file_path)}")
+    for img_path in sorted(image_files):
+        cropped_file = process_and_crop_image(img_path, STAGED_CROPS_DIR)
+        if cropped_file:
+            staged_crops.append(cropped_file)
 
-    staged_crops.sort()
-    logging.info(f"[USB] Staged {len(staged_crops)} cropped plan(s) for exfiltration.")
     return staged_crops
 
 
 # =====================================================================
-# 3. TRANSMISSION PIPELINE STUBS
+# 3. SECURITY & TRANSMISSION PIPELINE INTEGRATION
 # =====================================================================
 
-def prepare_signed_file(file_path: str) -> dict:
-    """Computes file hash, Ed25519 signature, and encrypts into transport payload."""
-    logging.info(f"[CRYPTO] Signing and encrypting target: {os.path.basename(file_path)}")
-    return {"path": file_path, "status": "READY"}
+def secure_and_transmit_batch(staged_files: List[str]):
+    """
+    Loads keypairs, signs/encrypts each staged image via ImageSecurity,
+    and handles simulated RF payload transmission.
+    """
+    logging.info("\n------------------------------------------")
+    logging.info("Initializing Cryptographic Key Infrastructure")
+    logging.info("------------------------------------------")
 
+    # Generate or load active keys using crypto_transport
+    if hasattr(crypto_transport, "generate_keypair"):
+        private_key, public_key = crypto_transport.generate_keypair()
+    else:
+        from cryptography.hazmat.primitives.asymmetric import ed25519
+        private_key = ed25519.Ed25519PrivateKey.generate()
+        public_key = private_key.public_key()
 
-def process_file_batch(staged_files: List[str]):
-    """Iterates through prepared target files and transmits over RF interface."""
+    if hasattr(crypto_transport, "generate_shared_aes_key"):
+        aes_key = crypto_transport.generate_shared_aes_key()
+    else:
+        from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+        aes_key = AESGCM.generate_key(bit_length=256)
+
     for file_path in staged_files:
-        payload = prepare_signed_file(file_path)
-        logging.info(f"[RF] Transmitting payload for {os.path.basename(payload['path'])}...")
-        time.sleep(0.5)  # Simulate packet chunk transmission
+        logging.info(f"\n[SECURITY] Processing target: {os.path.basename(file_path)}")
+        
+        with open(file_path, "rb") as f:
+            raw_bytes = f.read()
+
+        # Call crypto_transport routines
+        if hasattr(crypto_transport, "encrypt_and_sign"):
+            pkg = crypto_transport.encrypt_and_sign(raw_bytes, aes_key, private_key)
+        else:
+            # Fallback wrapper
+            signature = private_key.sign(raw_bytes)
+            nonce = os.urandom(12)
+            from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+            aesgcm = AESGCM(aes_key)
+            ciphertext = aesgcm.encrypt(nonce, raw_bytes, None)
+            pkg = {"nonce": nonce, "ciphertext": ciphertext, "signature": signature}
+
+        logging.info(f"[SECURITY] Payload Encrypted ({len(pkg['ciphertext'])} bytes) & Signed with Ed25519.")
+        
+        # Simulate RF transmission step
+        logging.info(f"[RF TRANSPORT] Transmitting payload packets for {os.path.basename(file_path)}...")
+        time.sleep(0.3)
+
+    logging.info("\n[PIPELINE] Batch processing and transmission completed successfully.")
 
 
 # =====================================================================
@@ -230,16 +186,16 @@ def process_file_batch(staged_files: List[str]):
 
 def main():
     logging.info("==========================================")
-    logging.info("Starting Pi Sender Daemon (Red Ring Mode)")
-    logging.info("==========================================")
+    logging.info("Starting Integrated Pi Sender Daemon")
+    logging.info("==========================================\n")
 
-    target_crops = scan_usb_for_plans(USB_MOUNT_DIR)
-    if not target_crops:
-        logging.info("[SYSTEM] No valid target red ring plans found on USB drive. Exiting.")
+    staged_targets = scan_and_stage_targets(INPUT_IMAGES_DIR)
+
+    if not staged_targets:
+        logging.info("[SYSTEM] No target red rings detected in input set. Terminating execution.")
         return
 
-    process_file_batch(target_crops)
-    logging.info("[SYSTEM] Execution batch complete.")
+    secure_and_transmit_batch(staged_targets)
 
 
 if __name__ == "__main__":
