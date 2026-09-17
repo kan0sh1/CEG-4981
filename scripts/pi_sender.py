@@ -9,6 +9,8 @@ import sys
 import glob
 import time
 import logging
+import socket
+import json
 from pathlib import Path
 from typing import List
 
@@ -51,6 +53,8 @@ INPUT_IMAGES_DIR = PROJECT_ROOT / "CircleDetection" / "test_images"
 STAGED_CROPS_DIR = PROJECT_ROOT / "staged_crops"
 IMG_EXTENSIONS = ("*.png", "*.jpg", "*.jpeg", "*.bmp", "*.tif", "*.tiff", "*.webp")
 
+RECEIVER_HOST = "127.0.0.1"
+RECEIVER_PORT = 65432  # Must match local_receiver.py port
 
 # =====================================================================
 # 2. VISION PIPELINE INTEGRATION
@@ -131,6 +135,71 @@ def scan_and_stage_targets(input_dir: Path) -> List[str]:
 # =====================================================================
 
 def secure_and_transmit_batch(staged_files: List[str]):
+    """
+    Encrypts/signs each staged image via ImageSecurity and transmits 
+    the raw hex payload via local TCP socket without local decryption.
+    """
+    logging.info("\n------------------------------------------")
+    logging.info("Initializing Cryptographic Key Infrastructure")
+    logging.info("------------------------------------------")
+
+    # Key generation wrappers
+    if hasattr(crypto_transport, "generate_keypair"):
+        private_key, public_key = crypto_transport.generate_keypair()
+    else:
+        from cryptography.hazmat.primitives.asymmetric import ed25519
+        private_key = ed25519.Ed25519PrivateKey.generate()
+        public_key = private_key.public_key()
+
+    if hasattr(crypto_transport, "generate_shared_aes_key"):
+        aes_key = crypto_transport.generate_shared_aes_key()
+    else:
+        from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+        aes_key = AESGCM.generate_key(bit_length=256)
+
+    for file_path in staged_files:
+        filename = os.path.basename(file_path)
+        logging.info(f"\n[SECURITY] Encrypting & Signing target: {filename}")
+        
+        with open(file_path, "rb") as f:
+            raw_bytes = f.read()
+
+        # Encrypt & Sign routines
+        if hasattr(crypto_transport, "encrypt_and_sign"):
+            pkg = crypto_transport.encrypt_and_sign(raw_bytes, aes_key, private_key)
+        else:
+            signature = private_key.sign(raw_bytes)
+            nonce = os.urandom(12)
+            from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+            aesgcm = AESGCM(aes_key)
+            ciphertext = aesgcm.encrypt(nonce, raw_bytes, None)
+            pkg = {"nonce": nonce, "ciphertext": ciphertext, "signature": signature}
+
+        # Hex-encode binary payloads for JSON transport
+        payload_package = {
+            "filename": filename,
+            "nonce_hex": pkg["nonce"].hex(),
+            "signature_hex": pkg["signature"].hex(),
+            "ciphertext_hex": pkg["ciphertext"].hex()
+        }
+
+        # Transmit over localhost socket to local_receiver.py
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as client_sock:
+                client_sock.connect((RECEIVER_HOST, RECEIVER_PORT))
+                client_sock.sendall(json.dumps(payload_package).encode("utf-8"))
+            logging.info(f"[TRANSMISSION SUCCESS] Encrypted payload sent to receiver for {filename}")
+        except ConnectionRefusedError:
+            logging.error(
+                f"[TRANSMISSION ERROR] Connection refused on {RECEIVER_HOST}:{RECEIVER_PORT}. "
+                "Ensure local_receiver.py is running in Terminal 1."
+            )
+
+        time.sleep(0.2)
+
+    logging.info("\n[PIPELINE] Batch processing and transmission completed successfully.")
+
+# def secure_and_transmit_batch(staged_files: List[str]):
     """
     Loads keypairs, signs/encrypts each staged image via ImageSecurity,
     and handles simulated RF payload transmission.
