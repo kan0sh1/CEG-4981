@@ -16,6 +16,11 @@ app = Flask(__name__, static_folder=WEBSITE_DIR, static_url_path='')
 def server_index():
     return send_from_directory(WEBSITE_DIR, 'index.html')
 
+# Catch all route to serve static assets
+@app.route('/<path:filename>')
+def server_static(filename):
+    return send_from_directory(WEBSITE_DIR, filename)
+
 # API endpoint for handling POST login
 @app.route('/api/login', methods=['POST'])
 def api_authenticate():

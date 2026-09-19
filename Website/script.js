@@ -47,8 +47,8 @@ function renderTransmittedPhotos() {
     for (let i = 1; i <= 10; i++) {                     // for loop for 10 photo slots
         const img = document.createElement('img');     // creates new element
 
-        img.src = 'images/photo${i}.png';       // sets source file path
-        img.alt = 'Transmitted Image ${i}';     // sets alternative text of the image
+        img.src = `images/photo${i}.png`;       // sets source file path
+        img.alt = `Transmitted Image ${i}`;     // sets alternative text of the image
 
         imageGrid.appendChild(img);     // places images to page, making it visible
     }

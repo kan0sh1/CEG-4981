@@ -16,13 +16,13 @@ body {
     max-width: 1200px;
     width: 100%;
     margin: 0 auto;
-    padding: 80px;
+    padding: 32px 20px;
 }
 
 header {
     background-color: bisque;
     position: sticky;
-    padding: 20px;
+    padding: 10px 20px;
     top: 0;
     z-index: 1000;
 }
@@ -104,7 +104,7 @@ footer {
     min-height: 20px;
 }
 /* authorization card dimensions */
-.auth-input {
+.auth_input {
     display: flex;
     gap: 12px;
     margin-top: 12px;
@@ -157,29 +157,30 @@ footer {
 
 /* outer section container, the entire photo section */
 #photos {
-    max-width: 800px;
+    max-width: 1024px;
     width: 100%;
     margin: 0 auto;
 }
 
 /* design of the card box background for the imgages to on */
 .photo-card {
-    padding: 24px;
+    padding: 70px;
 }
 
 /* Single column grid, parent container */
 .image-grid {
     display: flex;
-    align-items: center;
     flex-direction: column;
+    align-items: center;
     gap: 20px;
     width: 100%;
+    margin-top: 16px;
 }
 /* image styling, child container for the images themselves */
 .image-grid img {
     width: 100%;
-    max-width: 600px;
-    height: auto;
+    max-width: 820px;
+    height: 650px;
     border-radius: 8px;
     border: 1px solid #000;
 }
