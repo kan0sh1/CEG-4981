@@ -1,7 +1,8 @@
 """
 scripts/pi_sender.py
-Integrates CircleDetection/red_ring.py and ImageSecurity/crypto_transport.py
-into an end-to-end processing and transmission pipeline.
+Integrated Pi Sender Pipeline.
+Processes target frames via CircleDetection, encrypts/signs payloads,
+and transmits them over TCP (or Radio) to the Ground Station.
 """
 
 import os
@@ -11,13 +12,14 @@ import json
 import socket
 import hashlib
 import logging
+import argparse
 from pathlib import Path
 from typing import List
 
 import cv2
 
 # =====================================================================
-# 1. ENVIRONMENT & IMPORT RESOLUTION
+# 1. ENVIRONMENT & MODULE RESOLUTION
 # =====================================================================
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -37,24 +39,20 @@ try:
         detect_best_ring,
         crop_including_ring
     )
-    logging.info("[SETUP] Successfully imported CircleDetection.red_ring")
-except ImportError as e:
-    logging.error(f"[ERROR] Failed importing red_ring module: {e}")
-    sys.exit(1)
-
-try:
     from ImageSecurity import crypto_transport
-    logging.info("[SETUP] Successfully imported ImageSecurity.crypto_transport")
 except ImportError as e:
-    logging.error(f"[ERROR] Failed importing crypto_transport module: {e}")
+    logging.critical(f"[CRITICAL] Module import failed: {e}")
     sys.exit(1)
 
+# Default Pipeline Paths
 INPUT_IMAGES_DIR = PROJECT_ROOT / "CircleDetection" / "test_images"
 STAGED_CROPS_DIR = PROJECT_ROOT / "staged_crops"
 IMG_EXTENSIONS = ("*.png", "*.jpg", "*.jpeg", "*.bmp", "*.tif", "*.tiff", "*.webp")
 
-RECEIVER_HOST = "127.0.0.1"
-RECEIVER_PORT = 65432
+# RADIO INTEGRATION HOOK 1: Import radio driver module here later
+# Example:
+# from radio_transceiver import RadioDriver
+# radio = RadioDriver(port="/dev/ttyS0", baudrate=9600)
 
 
 # =====================================================================
@@ -62,6 +60,7 @@ RECEIVER_PORT = 65432
 # =====================================================================
 
 def process_and_crop_image(image_path: Path, output_dir: Path) -> str | None:
+    """Processes candidate image through red ring detection and stages lossless crop."""
     bgr = cv2.imread(str(image_path))
     if bgr is None:
         logging.warning(f"[VISION SKIP] Unreadable image file: {image_path.name}")
@@ -80,7 +79,6 @@ def process_and_crop_image(image_path: Path, output_dir: Path) -> str | None:
     )
 
     if ring is None:
-        logging.debug(f"[VISION SKIP] No red ring target found in: {image_path.name}")
         return None
 
     crop = crop_including_ring(
@@ -96,46 +94,23 @@ def process_and_crop_image(image_path: Path, output_dir: Path) -> str | None:
 
     output_dir.mkdir(parents=True, exist_ok=True)
     out_path = output_dir / f"crop_{image_path.stem}.png"
-
+    
+    # Save target crop as lossless PNG
     cv2.imwrite(str(out_path), crop, [int(cv2.IMWRITE_PNG_COMPRESSION), 1])
-    logging.info(
-        f"[VISION MATCH] Target detected in {image_path.name} "
-        f"(score={ring['score']:.2f}) -> Staged: {out_path.name}"
-    )
+    
+    logging.info(f"[TARGET MATCH] Staged target: {out_path.name} (Score: {ring['score']:.2f})")
     return str(out_path)
-
-
-def scan_and_stage_targets(input_dir: Path) -> List[str]:
-    logging.info(f"[PIPELINE] Scanning input path: {input_dir}")
-    if not input_dir.exists():
-        logging.error(f"[ERROR] Input directory {input_dir} does not exist.")
-        return []
-
-    image_files = []
-    for ext in IMG_EXTENSIONS:
-        image_files.extend(input_dir.glob(ext))
-
-    logging.info(f"[PIPELINE] Found {len(image_files)} source candidate(s)...")
-    staged_crops = []
-
-    for img_path in sorted(image_files):
-        cropped_file = process_and_crop_image(img_path, STAGED_CROPS_DIR)
-        if cropped_file:
-            staged_crops.append(cropped_file)
-
-    return staged_crops
 
 
 # =====================================================================
 # 3. SECURITY & TRANSMISSION PIPELINE INTEGRATION
 # =====================================================================
 
-def secure_and_transmit_batch(staged_files: List[str]):
-    logging.info("\n------------------------------------------")
-    logging.info("Initializing Cryptographic Key Infrastructure")
-    logging.info("------------------------------------------")
+def secure_and_transmit_batch(staged_files: List[str], receiver_host: str, receiver_port: int):
+    """Encrypts, signs, and transmits staged targets over network/RF transport layer."""
+    logging.info("[SECURITY] Generating Key Infrastructure for transmission batch...")
 
-    # Generate keypair and AES key
+    # Key Infrastructure Setup
     if hasattr(crypto_transport, "generate_keypair"):
         private_key, public_key = crypto_transport.generate_keypair()
     else:
@@ -149,13 +124,10 @@ def secure_and_transmit_batch(staged_files: List[str]):
         from cryptography.hazmat.primitives.ciphers.aead import AESGCM
         aes_key = AESGCM.generate_key(bit_length=256)
 
-    # Export key materials for offline verification on local receiver
     pub_bytes = public_key.public_bytes_raw()
-    
+
     for file_path in staged_files:
         filename = os.path.basename(file_path)
-        logging.info(f"\n[SECURITY] Encrypting & Signing target: {filename}")
-        
         with open(file_path, "rb") as f:
             raw_bytes = f.read()
 
@@ -173,7 +145,7 @@ def secure_and_transmit_batch(staged_files: List[str]):
             ciphertext = aesgcm.encrypt(nonce, raw_bytes, None)
             pkg = {"nonce": nonce, "ciphertext": ciphertext, "signature": signature}
 
-        # Hex-encode binary payloads + attach key materials & MD5
+        # Structured Transport Package
         payload_package = {
             "filename": filename,
             "source_md5": source_md5,
@@ -184,34 +156,67 @@ def secure_and_transmit_batch(staged_files: List[str]):
             "ciphertext_hex": pkg["ciphertext"].hex()
         }
 
+        # Convert payload dictionary to JSON string
+        json_payload = json.dumps(payload_package)
+
+        # =====================================================================
+        # RADIO INTEGRATION HOOK 2: TRANSMISSION TRANSPORT LAYER
+        # =====================================================================
+        # CURRENT IMPLEMENTATION: Standard Local/Network TCP Socket
         try:
             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as client_sock:
-                client_sock.connect((RECEIVER_HOST, RECEIVER_PORT))
-                client_sock.sendall(json.dumps(payload_package).encode("utf-8"))
-            logging.info(f"[TRANSMISSION SUCCESS] Payload sent for {filename} (MD5: {source_md5})")
-        except ConnectionRefusedError:
-            logging.error(
-                f"[TRANSMISSION ERROR] Connection refused on {RECEIVER_HOST}:{RECEIVER_PORT}. "
-                "Ensure local_receiver.py is running in Terminal 1."
-            )
+                client_sock.settimeout(5.0)
+                client_sock.connect((receiver_host, receiver_port))
+                client_sock.sendall(json_payload.encode("utf-8"))
+            logging.info(f"[TRANSMISSION SUCCESS] Sent {filename} to {receiver_host}:{receiver_port}")
+        except Exception as e:
+            logging.error(f"[TRANSMISSION FAILED] Unable to reach {receiver_host}:{receiver_port} - {e}")
+
+        # FUTURE RADIO IMPLEMENTATION: Replace TCP socket block above with teammate's radio driver function:
+        # Example:
+        # try:
+        #     radio.transmit_packet(json_payload)
+        #     logging.info(f"[RADIO SUCCESS] Transmitted {filename} over radio link.")
+        # except Exception as e:
+        #     logging.error(f"[RADIO FAILED] Transmission failed: {e}")
+        # =====================================================================
 
         time.sleep(0.2)
 
-    logging.info("\n[PIPELINE] Batch processing and transmission completed successfully.")
 
+# =====================================================================
+# 4. ENTRY POINT
+# =====================================================================
 
 def main():
-    logging.info("==========================================")
-    logging.info("Starting Integrated Pi Sender Daemon")
-    logging.info("==========================================\n")
+    parser = argparse.ArgumentParser(description="Pi Sender Edge Daemon")
+    parser.add_argument("--host", type=str, default="127.0.0.1", help="Target Receiver IP address")
+    parser.add_argument("--port", type=int, default=65432, help="Target Receiver TCP port")
+    parser.add_argument("--input", type=str, default=str(INPUT_IMAGES_DIR), help="Path to input images directory")
+    args = parser.parse_args()
 
-    staged_targets = scan_and_stage_targets(INPUT_IMAGES_DIR)
+    input_path = Path(args.input)
+    logging.info(f"[STARTUP] Running Pi Sender -> Target: {args.host}:{args.port}")
 
-    if not staged_targets:
-        logging.info("[SYSTEM] No target red rings detected in input set. Terminating execution.")
+    if not input_path.exists():
+        logging.error(f"[ERROR] Specified input path does not exist: {input_path}")
         return
 
-    secure_and_transmit_batch(staged_targets)
+    image_files = []
+    for ext in IMG_EXTENSIONS:
+        image_files.extend(input_path.glob(ext))
+
+    staged_crops = []
+    for img_path in sorted(image_files):
+        cropped = process_and_crop_image(img_path, STAGED_CROPS_DIR)
+        if cropped:
+            staged_crops.append(cropped)
+
+    if not staged_crops:
+        logging.info("[SYSTEM] No valid target red rings found for processing.")
+        return
+
+    secure_and_transmit_batch(staged_crops, args.host, args.port)
 
 
 if __name__ == "__main__":
